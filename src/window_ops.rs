@@ -202,18 +202,17 @@ fn detect_vt_bridge(pane: &mut Pane) -> bool {
 ///
 /// Strategy:
 ///
-///   1. If the process tree contains a VT bridge (wsl.exe, ssh.exe, etc.)
-///      AND a fullscreen TUI app is running (alternate screen buffer active),
-///      inject SGR mouse as KEY_EVENT records via WriteConsoleInputW.
-///      This bypasses ConPTY entirely — the raw escape sequence characters
-///      reach wsl.exe → Linux PTY → htop/vim/etc.
-///      When not in fullscreen mode (bash prompt), skip VT injection to
-///      prevent garbage characters.  Fall back to Win32 MOUSE_EVENT which
-///      is harmlessly ignored by wsl.exe.
-///   2. For native ConPTY children: always inject Win32 MOUSE_EVENT records
-///      via WriteConsoleInputW.  Crossterm/ratatui apps read MOUSE_EVENT
-///      records through ReadConsoleInputW (they enable ENABLE_MOUSE_INPUT).
-///      Node.js/Ink apps (claude) and shells ignore MOUSE_EVENT — harmless.
+///   1. If a fullscreen TUI app is detected (alternate screen or content
+///      heuristic), inject SGR mouse as KEY_EVENT records via
+///      WriteConsoleInputW.  This works for both VT-bridge children
+///      (wsl.exe → Linux PTY → htop/vim) and native ConPTY children
+///      (nvim.exe, opencode.exe).  ConPTY does NOT translate Win32
+///      MOUSE_EVENT records into VT mouse sequences, so native TUI apps
+///      that expect SGR mouse input never receive wheel/click events
+///      through the MOUSE_EVENT path.  Injecting SGR sequences as
+///      KEY_EVENT records bypasses this limitation.  (fixes #60)
+///   2. For shell prompts (no fullscreen TUI), inject Win32 MOUSE_EVENT
+///      records.  Shells ignore MOUSE_EVENT, so this is harmless.
 ///      NOTE: ENABLE_VIRTUAL_TERMINAL_INPUT is NOT a reliable indicator of
 ///      mouse support — it only means the app parses VT keyboard input
 ///      (arrow keys, function keys).  Node.js enables VTI after the user
@@ -221,51 +220,44 @@ fn detect_vt_bridge(pane: &mut Pane) -> bool {
 pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press: bool,
                           button_state: u32, event_flags: u32, win_name: &str) {
     let vt_bridge = detect_vt_bridge(pane);
+    let fullscreen = is_fullscreen_tui(pane);
 
-    if vt_bridge {
-        // VT bridge (WSL/SSH): check if a fullscreen TUI app is running
-        let fullscreen = is_fullscreen_tui(pane);
-        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true fullscreen={}",
-            col, row, vt_button, press, win_name, fullscreen));
-        if fullscreen {
-            // TUI app detected (htop, vim, etc.) — inject SGR mouse as KEY_EVENTs.
-            // This bypasses ConPTY and delivers raw escape sequence characters to
-            // wsl.exe → Linux PTY → the TUI app.
-            let vt_col = (col + 1).max(1) as u16;
-            let vt_row = (row + 1).max(1) as u16;
-            let ch = if press { 'M' } else { 'm' };
-            let sgr_seq = format!("\x1b[<{};{};{}{}", vt_button, vt_col, vt_row, ch);
-            mouse_log(&format!("  -> Console VT injection (KEY_EVENTs): seq={:?}", sgr_seq));
-            if pane.child_pid.is_none() {
-                pane.child_pid = mouse_inject::get_child_pid(&*pane.child);
-            }
-            if let Some(pid) = pane.child_pid {
-                let ok = mouse_inject::send_vt_sequence(pid, sgr_seq.as_bytes());
-                mouse_log(&format!("  -> Console VT inject result: {}", ok));
-            }
-        } else {
-            // Shell prompt (no fullscreen TUI) — use Win32 MOUSE_EVENT injection.
-            // wsl.exe ignores MOUSE_EVENT records (it uses ReadFile, not ReadConsoleInput),
-            // so this is harmless — no garbage characters are printed.
-            mouse_log(&format!("  -> Win32 injection (vt_bridge fallback): col={} row={} btn=0x{:X} flags=0x{:X}", col, row, button_state, event_flags));
-            let ok = inject_mouse(pane, col, row, button_state, event_flags);
-            mouse_log(&format!("  -> Win32 inject result: {}", ok));
+    if fullscreen {
+        // Fullscreen TUI app detected (nvim, htop, opencode, etc.) —
+        // inject SGR mouse as KEY_EVENTs regardless of VT bridge status.
+        //
+        // For VT bridge: bypasses ConPTY, delivers raw escape sequence to
+        //   wsl.exe → Linux PTY → the TUI app.
+        // For native ConPTY: delivers VT mouse sequences that apps like
+        //   nvim can parse.  Win32 MOUSE_EVENT records do NOT get translated
+        //   by ConPTY into VT mouse sequences, so this is the only way to
+        //   deliver mouse events to native TUI apps.  (fixes #60)
+        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge={} fullscreen=true -> SGR VT injection",
+            col, row, vt_button, press, win_name, vt_bridge));
+        let vt_col = (col + 1).max(1) as u16;
+        let vt_row = (row + 1).max(1) as u16;
+        let ch = if press { 'M' } else { 'm' };
+        let sgr_seq = format!("\x1b[<{};{};{}{}", vt_button, vt_col, vt_row, ch);
+        mouse_log(&format!("  -> Console VT injection (KEY_EVENTs): seq={:?}", sgr_seq));
+        if pane.child_pid.is_none() {
+            pane.child_pid = mouse_inject::get_child_pid(&*pane.child);
         }
+        if let Some(pid) = pane.child_pid {
+            let ok = mouse_inject::send_vt_sequence(pid, sgr_seq.as_bytes());
+            mouse_log(&format!("  -> Console VT inject result: {}", ok));
+        }
+    } else if vt_bridge {
+        // VT bridge at shell prompt — use Win32 MOUSE_EVENT injection.
+        // wsl.exe ignores MOUSE_EVENT records (it uses ReadFile, not ReadConsoleInput),
+        // so this is harmless — no garbage characters are printed.
+        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true fullscreen=false -> Win32 MOUSE_EVENT (vt_bridge shell)",
+            col, row, vt_button, press, win_name));
+        let ok = inject_mouse(pane, col, row, button_state, event_flags);
+        mouse_log(&format!("  -> Win32 inject result: {}", ok));
     } else {
-        // Native ConPTY child — always use Win32 MOUSE_EVENT injection.
-        //
-        // All native Windows console apps that want mouse input use
-        // ReadConsoleInputW with ENABLE_MOUSE_INPUT — they read MOUSE_EVENT
-        // records directly.  This includes crossterm/ratatui (pstop) and
-        // Node.js/Ink (claude).  VT SGR mouse sequences written to the ConPTY
-        // input pipe would only work if the app reads raw VT from stdin,
-        // but native ConPTY apps read INPUT_RECORDs instead.
-        //
-        // NOTE: We previously tried using ENABLE_VIRTUAL_TERMINAL_INPUT (VTI)
-        // as a heuristic for mouse support, but VTI only indicates VT keyboard
-        // input parsing — Node.js enables VTI after the user types, then
-        // SGR mouse sequences appear as garbage.
-        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} -> Win32 MOUSE_EVENT (native ConPTY)",
+        // Native ConPTY child at shell prompt — use Win32 MOUSE_EVENT injection.
+        // Shells don't consume MOUSE_EVENT, so this is harmless.
+        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} -> Win32 MOUSE_EVENT (native ConPTY shell)",
             col, row, vt_button, press, win_name));
         let ok = inject_mouse(pane, col, row, button_state, event_flags);
         mouse_log(&format!("  -> Win32 inject result: {}", ok));
@@ -588,8 +580,15 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
         let alt = active_pane(&win.root, &win.active_path)
             .map_or(false, |p| {
                 if let Ok(parser) = p.term.lock() {
-                    parser.screen().alternate_screen()
-                } else { false }
+                    if parser.screen().alternate_screen() {
+                        return true;
+                    }
+                }
+                // Fallback heuristic: ConPTY may strip DECSET 1049h for native
+                // children so alternate_screen() returns false even when a TUI
+                // app (nvim, opencode, etc.) is running.  Use the fullscreen
+                // content heuristic as a fallback.  (fixes #60)
+                is_fullscreen_tui(p)
             });
         let sgr_btn: u8 = if up { 64 } else { 65 };
         let wheel_delta: i16 = if up { 120 } else { -120 };

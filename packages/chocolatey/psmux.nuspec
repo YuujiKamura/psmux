@@ -8,6 +8,7 @@
     <owners>marlocarlo</owners>
     <licenseUrl>https://github.com/marlocarlo/psmux/blob/master/LICENSE</licenseUrl>
     <projectUrl>https://github.com/marlocarlo/psmux</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/marlocarlo/psmux/master/icon.svg</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <description>Terminal multiplexer for Windows - tmux alternative for PowerShell and Windows Terminal. Includes psmux, pmux, and tmux commands.</description>
     <summary>Terminal multiplexer for Windows (tmux alternative)</summary>
