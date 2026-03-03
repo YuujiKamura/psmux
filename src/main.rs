@@ -37,7 +37,7 @@ use crossterm::cursor::{EnableBlinking, DisableBlinking};
 use crossterm::event::{EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste};
 
 use crate::platform::enable_virtual_terminal_processing;
-use crate::cli::{print_help, print_version, print_commands, extract_session_from_target};
+use crate::cli::{print_help, print_version, print_commands};
 use crate::session::{cleanup_stale_port_files, read_session_key, send_control,
     send_control_with_response, resolve_last_session_name, resolve_default_session_name,
     kill_remaining_server_processes};
@@ -95,6 +95,33 @@ fn run_main() -> io::Result<()> {
         env::set_var("PSMUX_CONFIG_FILE", config_file);
     }
 
+    // Helper: resolve session from TMUX env var (set inside psmux panes).
+    // TMUX format: /tmp/psmux-<pid>/<socket_name>,<port>,<session_idx>
+    // Returns the port file base name (which includes -L namespace prefix).
+    let resolve_session_from_tmux_env = || -> Option<String> {
+        let tmux_val = env::var("TMUX").ok()?;
+        let parts: Vec<&str> = tmux_val.split(',').collect();
+        if parts.len() < 2 { return None; }
+        let port: u16 = parts[1].trim().parse().ok()?;
+        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).ok()?;
+        let psmux_dir = format!("{}\\.psmux", home);
+        if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "port").unwrap_or(false) {
+                    if let Ok(port_str) = std::fs::read_to_string(&path) {
+                        if let Ok(file_port) = port_str.trim().parse::<u16>() {
+                            if file_port == port {
+                                return path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+
     // Parse -t flag early to set target session for all commands
     // Supports session:window.pane format (e.g., "dev:0.1")
     // PSMUX_TARGET_SESSION stores the port file base name (for port file lookup)
@@ -103,47 +130,36 @@ fn run_main() -> io::Result<()> {
         if let Some(target) = args.get(pos + 1) {
             // Store the full target for the server to parse
             env::set_var("PSMUX_TARGET_FULL", target);
-            // Extract just the session name for port file lookup
-            let session = extract_session_from_target(target);
-            // Apply -L namespace prefix for port file lookup
-            let port_file_base = if let Some(ref l) = l_socket_name {
-                format!("{}__{}", l, session)
+            // Extract just the session name for port file lookup.
+            // parse_target returns None for bare pane IDs (%N) and window IDs (@N)
+            // since those don't encode a session name.
+            let parsed = crate::cli::parse_target(target);
+            let port_file_base = if let Some(ref session) = parsed.session {
+                // Explicit session in the target — use it directly
+                if let Some(ref l) = l_socket_name {
+                    format!("{}__{}", l, session)
+                } else {
+                    session.clone()
+                }
             } else {
-                session.clone()
+                // No session in the target (bare %N or @N) — resolve from
+                // the TMUX env var (current pane's owning session), falling
+                // back to "default" only as last resort.
+                resolve_session_from_tmux_env()
+                    .unwrap_or_else(|| {
+                        if let Some(ref l) = l_socket_name {
+                            format!("{}__default", l)
+                        } else {
+                            "default".to_string()
+                        }
+                    })
             };
             env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
         }
     } else if env::var("PSMUX_TARGET_SESSION").is_err() {
-        // No -t flag: try to resolve session from TMUX env var (set inside psmux panes)
-        // TMUX format: /tmp/psmux-<pid>/<socket_name>,<port>,<session_idx>
-        if let Ok(tmux_val) = env::var("TMUX") {
-            // Extract the port from the TMUX value
-            let parts: Vec<&str> = tmux_val.split(',').collect();
-            if parts.len() >= 2 {
-                if let Ok(port) = parts[1].trim().parse::<u16>() {
-                    // Look up which session owns this port (port file base
-                    // already includes -L namespace prefix if applicable)
-                    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                    let psmux_dir = format!("{}\\.psmux", home);
-                    if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.extension().map(|e| e == "port").unwrap_or(false) {
-                                if let Ok(port_str) = std::fs::read_to_string(&path) {
-                                    if let Ok(file_port) = port_str.trim().parse::<u16>() {
-                                        if file_port == port {
-                                            if let Some(port_file_base) = path.file_stem().and_then(|s| s.to_str()) {
-                                                env::set_var("PSMUX_TARGET_SESSION", port_file_base);
-                                            }
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // No -t flag: resolve session from TMUX env var
+        if let Some(port_file_base) = resolve_session_from_tmux_env() {
+            env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
         }
     }
     
@@ -842,77 +858,49 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             // select-pane - Select the active pane
+            // Forward all args to the server (which handles -P, -T, -m, -M,
+            // -e, -d, -U, -D, -L, -R, -l, -Z, etc.).  -t is already
+            // consumed by the global handler and sent via the TARGET protocol
+            // line, so it is not present in cmd_args.
             "select-pane" | "selectp" => {
                 let mut cmd = "select-pane".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        "-D" => { cmd.push_str(" -D"); }
-                        "-U" => { cmd.push_str(" -U"); }
-                        "-L" => { cmd.push_str(" -L"); }
-                        "-R" => { cmd.push_str(" -R"); }
-                        "-l" => { cmd.push_str(" -l"); }
-                        "-Z" => { cmd.push_str(" -Z"); }
-                        _ => {}
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
                     }
-                    i += 1;
                 }
                 cmd.push('\n');
                 send_control(cmd)?;
                 return Ok(());
             }
             // select-window - Select a window
+            // Forward all args to the server (which handles -l, -n, -p,
+            // window index, etc.).
             "select-window" | "selectw" => {
                 let mut cmd = "select-window".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        "-l" => { cmd.push_str(" -l"); }
-                        "-n" => { cmd.push_str(" -n"); }
-                        "-p" => { cmd.push_str(" -p"); }
-                        _ => {}
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
                     }
-                    i += 1;
                 }
                 cmd.push('\n');
                 send_control(cmd)?;
                 return Ok(());
             }
             // list-panes - List all panes
+            // Forward all args to the server.
             "list-panes" | "lsp" => {
                 let mut cmd = "list-panes".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-a" => { cmd.push_str(" -a"); }
-                        "-s" => { cmd.push_str(" -s"); }
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        "-F" => {
-                            if let Some(f) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -F \"{}\"", f.trim_matches('"').replace("\"", "\\\"")));
-                                i += 1;
-                            }
-                        }
-                        _ => {}
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
                     }
-                    i += 1;
                 }
                 cmd.push('\n');
                 let resp = send_control_with_response(cmd)?;
@@ -920,28 +908,15 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             // list-windows - List all windows
+            // Forward all args to the server.
             "list-windows" | "lsw" => {
                 let mut cmd = "list-windows".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-a" => { cmd.push_str(" -a"); }
-                        "-J" => { cmd.push_str(" -J"); }
-                        "-F" => {
-                            if let Some(f) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -F \"{}\"", f.trim_matches('"').replace("\"", "\\\"")));
-                                i += 1;
-                            }
-                        }
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        _ => {}
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
                     }
-                    i += 1;
                 }
                 cmd.push('\n');
                 let resp = send_control_with_response(cmd)?;
@@ -949,21 +924,15 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             // kill-window - Kill a window
+            // Forward all args to the server.
             "kill-window" | "killw" => {
                 let mut cmd = "kill-window".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        "-a" => { cmd.push_str(" -a"); }
-                        _ => {}
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
                     }
-                    i += 1;
                 }
                 cmd.push('\n');
                 send_control(cmd)?;
@@ -1088,97 +1057,45 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             // swap-pane - Swap panes
+            // Forward all args to the server.
             "swap-pane" | "swapp" => {
                 let mut cmd = "swap-pane".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-D" => { cmd.push_str(" -D"); }
-                        "-U" => { cmd.push_str(" -U"); }
-                        "-d" => { cmd.push_str(" -d"); }
-                        "-s" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -s {}", t));
-                                i += 1;
-                            }
-                        }
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        _ => {}
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
                     }
-                    i += 1;
                 }
                 cmd.push('\n');
                 send_control(cmd)?;
                 return Ok(());
             }
             // resize-pane - Resize a pane
+            // Forward all args to the server.
             "resize-pane" | "resizep" => {
                 let mut cmd = "resize-pane".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-D" => { cmd.push_str(" -D"); }
-                        "-U" => { cmd.push_str(" -U"); }
-                        "-L" => { cmd.push_str(" -L"); }
-                        "-R" => { cmd.push_str(" -R"); }
-                        "-Z" => { cmd.push_str(" -Z"); }
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        "-x" => {
-                            if let Some(v) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -x {}", v));
-                                i += 1;
-                            }
-                        }
-                        "-y" => {
-                            if let Some(v) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -y {}", v));
-                                i += 1;
-                            }
-                        }
-                        s if s.parse::<i32>().is_ok() => {
-                            cmd.push_str(&format!(" {}", s));
-                        }
-                        _ => {}
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
                     }
-                    i += 1;
                 }
                 cmd.push('\n');
                 send_control(cmd)?;
                 return Ok(());
             }
             // paste-buffer - Paste buffer into pane
+            // Forward all args to the server.
             "paste-buffer" | "pasteb" => {
                 let mut cmd = "paste-buffer".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        "-b" => {
-                            if let Some(b) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -b {}", b));
-                                i += 1;
-                            }
-                        }
-                        "-d" => { cmd.push_str(" -d"); }
-                        "-p" => { cmd.push_str(" -p"); }
-                        _ => {}
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
                     }
-                    i += 1;
                 }
                 cmd.push('\n');
                 send_control(cmd)?;
@@ -1212,72 +1129,48 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             // list-buffers - List paste buffers
+            // Forward all args to the server.
             "list-buffers" | "lsb" => {
-                let mut format_str: Option<String> = None;
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-F" => {
-                            if let Some(f) = cmd_args.get(i + 1) {
-                                format_str = Some(f.to_string());
-                                i += 1;
-                            }
-                        }
-                        "-t" => { i += 1; } // skip target
-                        _ => {}
+                let mut cmd = "list-buffers".to_string();
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
                     }
-                    i += 1;
                 }
-                let cmd = if let Some(fmt) = format_str {
-                    format!("list-buffers -F {}\n", fmt)
-                } else {
-                    "list-buffers\n".to_string()
-                };
+                cmd.push('\n');
                 let resp = send_control_with_response(cmd)?;
                 print!("{}", resp);
                 return Ok(());
             }
             // show-buffer - Show buffer contents
+            // Forward all args to the server.
             "show-buffer" | "showb" => {
-                let mut buffer_name: Option<String> = None;
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-b" => {
-                            if let Some(b) = cmd_args.get(i + 1) {
-                                buffer_name = Some(b.to_string());
-                                i += 1;
-                            }
-                        }
-                        _ => {}
-                    }
-                    i += 1;
-                }
                 let mut cmd = "show-buffer".to_string();
-                if let Some(b) = buffer_name { cmd.push_str(&format!(" -b {}", b)); }
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
+                    }
+                }
                 cmd.push('\n');
                 let resp = send_control_with_response(cmd)?;
                 print!("{}", resp);
                 return Ok(());
             }
             // delete-buffer - Delete a paste buffer
+            // Forward all args to the server.
             "delete-buffer" | "deleteb" => {
-                let mut buffer_name: Option<String> = None;
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-b" => {
-                            if let Some(b) = cmd_args.get(i + 1) {
-                                buffer_name = Some(b.to_string());
-                                i += 1;
-                            }
-                        }
-                        _ => {}
-                    }
-                    i += 1;
-                }
                 let mut cmd = "delete-buffer".to_string();
-                if let Some(b) = buffer_name { cmd.push_str(&format!(" -b {}", b)); }
+                for arg in &cmd_args[1..] {
+                    if arg.contains(' ') || arg.contains('\t') {
+                        cmd.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
+                    } else {
+                        cmd.push_str(&format!(" {}", arg));
+                    }
+                }
                 cmd.push('\n');
                 send_control(cmd)?;
                 return Ok(());
