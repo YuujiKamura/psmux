@@ -232,7 +232,8 @@ let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_i
 } else {
     None
 };
-if targeted_kill_pane_id.is_none() {
+let skip_pane_focus = matches!(cmd, "display-message" | "display");
+if !skip_pane_focus && targeted_kill_pane_id.is_none() {
     if let Some(pid) = target_pane {
         if is_focus_cmd {
             if pane_is_id {
@@ -696,8 +697,10 @@ match cmd {
         }
 
         let fmt = parts.join(" ");
+        // Pass target pane index for PANE_POS_OVERRIDE (#113).
+        let target_pane_idx: Option<usize> = if !pane_is_id { target_pane } else { None };
         let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, !print_stdout));
+        let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx));
         if let Ok(text) = rrx.recv() {
             if print_stdout {
                 let _ = writeln!(write_stream, "{}", text);
@@ -1219,7 +1222,7 @@ match cmd {
         let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
         if let Some(fmt_str) = fmt {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, false));
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, None));
             if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
         } else {
             let (rtx, rrx) = mpsc::channel::<String>();

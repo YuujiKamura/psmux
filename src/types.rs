@@ -720,7 +720,7 @@ pub enum CtrlReq {
     ShowBuffer(mpsc::Sender<String>),
     ShowBufferAt(mpsc::Sender<String>, usize),
     DeleteBuffer,
-    DisplayMessage(mpsc::Sender<String>, String, bool),  // resp, format, show_on_status_bar
+    DisplayMessage(mpsc::Sender<String>, String, Option<usize>),  // resp, format, target_pane_idx
     LastWindow,
     LastPane,
     RotateWindow(bool),

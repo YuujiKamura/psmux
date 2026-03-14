@@ -769,12 +769,28 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     if detached {
+                        // Capture new pane ID before reverting focus
+                        let new_pane_id = crate::tree::get_active_pane_id(
+                            &app.windows[app.active_idx].root,
+                            &app.windows[app.active_idx].active_path,
+                        );
                         // Revert focus to the previously active pane.
                         // After split, prev_path now points to a Split node;
                         // the original pane is child [0] of that Split.
                         let mut revert_path = prev_path;
                         revert_path.push(0);
                         app.windows[app.active_idx].active_path = revert_path;
+                        // Detached splits never focus the new pane, so move
+                        // it to the END of MRU, not the front (#112).
+                        if let Some(nid) = new_pane_id {
+                            let win = &mut app.windows[app.active_idx];
+                            win.pane_mru.retain(|&id| id != nid);
+                            win.pane_mru.push(nid);
+                        }
+                    } else {
+                        // Non-detached: new pane keeps focus.
+                        // Cancel temp_focus_restore so -t doesn't revert (#112).
+                        temp_focus_restore = None;
                     }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     // Replenish warm pane for the next new-window/split
@@ -809,9 +825,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let fmt = format_str.as_deref().unwrap_or("#{session_name}:#{window_index}.#{pane_index}");
                     let pane_info = crate::format::expand_format_for_window(fmt, &app, app.active_idx);
                     if detached {
+                        // Capture new pane ID before reverting focus
+                        let new_pane_id = crate::tree::get_active_pane_id(
+                            &app.windows[app.active_idx].root,
+                            &app.windows[app.active_idx].active_path,
+                        );
                         let mut revert_path = prev_path;
                         revert_path.push(0);
                         app.windows[app.active_idx].active_path = revert_path;
+                        // Detached splits: new pane to END of MRU (#112)
+                        if let Some(nid) = new_pane_id {
+                            let win = &mut app.windows[app.active_idx];
+                            win.pane_mru.retain(|&id| id != nid);
+                            win.pane_mru.push(nid);
+                        }
+                    } else {
+                        temp_focus_restore = None;
                     }
                     let _ = resp.send(pane_info);
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
@@ -1889,12 +1918,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::DeleteBuffer => {
                     if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
                 }
-                CtrlReq::DisplayMessage(resp, fmt, show_on_status) => {
-                    let result = expand_format(&fmt, &app);
-                    if show_on_status {
-                        app.status_message = Some((result.clone(), std::time::Instant::now()));
-                        state_dirty = true;
-                    }
+                CtrlReq::DisplayMessage(resp, fmt, target_pane_idx) => {
+                    let result = if let Some(pane_idx) = target_pane_idx {
+                        // -t targeting: evaluate format for the specific pane
+                        // using PANE_POS_OVERRIDE so #{pane_active} reflects
+                        // the REAL active pane, not the target (#113)
+                        crate::format::expand_format_for_pane(&fmt, &app, app.active_idx, pane_idx)
+                    } else {
+                        expand_format(&fmt, &app)
+                    };
                     let _ = resp.send(result);
                 }
                 CtrlReq::LastWindow => {
