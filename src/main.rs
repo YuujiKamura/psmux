@@ -518,7 +518,55 @@ fn run_main() -> io::Result<()> {
                 if env::var("PSMUX_REMOTE_ATTACH").ok().as_deref() == Some("1") {
                     // Already set up for attach — skip server spawn
                 } else {
-                // Always spawn a background server first
+                // Fast path: try to claim a pre-spawned warm server.
+                // The warm server has config loaded and shell already running,
+                // so claiming it avoids the full cold-start latency.
+                // Only eligible when no custom command/dir is requested.
+                let claimed_warm = if initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() {
+                    let warm_base = if let Some(ref l) = l_socket_name {
+                        format!("{}____warm__", l)
+                    } else {
+                        "__warm__".to_string()
+                    };
+                    let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
+                    if std::path::Path::new(&warm_port_path).exists() {
+                        if let Ok(warm_port_str) = std::fs::read_to_string(&warm_port_path) {
+                            if let Ok(warm_port) = warm_port_str.trim().parse::<u16>() {
+                                let warm_addr = format!("127.0.0.1:{}", warm_port);
+                                if std::net::TcpStream::connect_timeout(
+                                    &warm_addr.parse().unwrap(),
+                                    Duration::from_millis(100),
+                                ).is_ok() {
+                                    let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
+                                    if !warm_key.is_empty() {
+                                        match crate::session::send_auth_cmd_response(
+                                            &warm_addr, &warm_key,
+                                            format!("claim-session {}\n", name).as_bytes(),
+                                        ) {
+                                            Ok(resp) if resp.contains("OK") => {
+                                                if let Some(ref wn) = window_name {
+                                                    let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
+                                                    let _ = crate::session::send_auth_cmd(
+                                                        &warm_addr, &new_key,
+                                                        format!("rename-window {}\n", wn).as_bytes(),
+                                                    );
+                                                }
+                                                true
+                                            }
+                                            _ => false,
+                                        }
+                                    } else { false }
+                                } else {
+                                    let _ = std::fs::remove_file(&warm_port_path);
+                                    false
+                                }
+                            } else { false }
+                        } else { false }
+                    } else { false }
+                } else { false };
+
+                if !claimed_warm {
+                // Cold path: spawn a background server from scratch
                 let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
                 let mut server_args: Vec<String> = vec!["server".into(), "-s".into(), name.clone()];
                 // Pass -L socket name to server for namespace isolation
@@ -592,6 +640,7 @@ fn run_main() -> io::Result<()> {
                     cmd.stderr(std::process::Stdio::null());
                     let _child = cmd.spawn().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("failed to spawn server: {e}")))?;
                 }
+                } // end if !claimed_warm (cold path)
                 } // end else (not PSMUX_REMOTE_ATTACH)
                 
                 // Wait for server to create port file (up to 5 seconds)
