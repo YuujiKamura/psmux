@@ -1015,6 +1015,7 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
             let mut f = String::new();
             if win_idx == app.active_idx { f.push('*'); }
             else if win_idx == app.last_window_idx { f.push('-'); }
+            if win.zoom_saved.is_some() { f.push('Z'); }
             if win.activity_flag { f.push('#'); }
             if win.bell_flag { f.push('!'); }
             if win.silence_flag { f.push('~'); }
@@ -1022,7 +1023,7 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         }
         "window_id" => format!("@{}", win.id),
         "window_activity_flag" => if win.activity_flag { "1".into() } else { "0".into() },
-        "window_zoomed_flag" => if app.zoom_saved.is_some() && win_idx == app.active_idx { "1".into() } else { "0".into() },
+        "window_zoomed_flag" => if win.zoom_saved.is_some() { "1".into() } else { "0".into() },
         "window_layout" | "window_visible_layout" => generate_window_layout(&win.root, app.last_window_area),
         "window_width" => app.last_window_area.width.to_string(),
         "window_height" => app.last_window_area.height.to_string(),

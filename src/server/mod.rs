@@ -1130,7 +1130,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                         mode_style_escaped, status_position_escaped, status_justify_escaped,
                         cursor_style_code, app.status_visible, app.repeat_time_ms,
-                        app.zoom_saved.is_some(),
+                        app.windows.get(app.active_idx).map_or(false, |w| w.zoom_saved.is_some()),
                     ));
                     // Inject overlay state (popup, menu, confirm, display_panes)
                     {
@@ -1883,7 +1883,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     hook_event = Some("after-rename-session");
                 }
-                CtrlReq::ClaimSession(name, resp) => {
+                CtrlReq::ClaimSession(name, client_cwd, resp) => {
                     // Same as RenameSession but with a synchronous response
                     // so the CLI knows the rename completed before attaching.
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
@@ -1905,6 +1905,35 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     app.session_name = name;
+                    // Update env so run-shell/hooks from this server target the new name
+                    env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
+                    // Honour the client's working directory: the warm server
+                    // was spawned from a previous session whose CWD may differ
+                    // from where the user ran `psmux` now.  Update the
+                    // server's CWD (for future pane spawns) and inject `cd`
+                    // into the active pane so the shell starts in the right
+                    // directory.
+                    if let Some(ref cwd) = client_cwd {
+                        let cwd_path = std::path::Path::new(cwd);
+                        if cwd_path.is_dir() {
+                            let server_cwd_differs = env::current_dir()
+                                .map(|cur| cur != cwd_path)
+                                .unwrap_or(true);
+                            if server_cwd_differs {
+                                env::set_current_dir(cwd_path).ok();
+                                // Inject cd into the active pane's shell
+                                if let Some(win) = app.windows.last_mut() {
+                                    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                                        use std::io::Write as _;
+                                        let escaped = cwd.replace('\'', "''");
+                                        let cd_cmd = format!(" cd '{}'\r\n", escaped);
+                                        let _ = p.writer.write_all(cd_cmd.as_bytes());
+                                        let _ = p.writer.flush();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // Update env so run-shell/hooks from this server target the new name
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     // Re-load user config so the claimed session reflects the
@@ -2992,7 +3021,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                 mode_style_escaped, status_position_escaped, status_justify_escaped,
                 cursor_style_code, app.status_visible, app.repeat_time_ms,
-                app.zoom_saved.is_some(),
+                app.windows.get(app.active_idx).map_or(false, |w| w.zoom_saved.is_some()),
             ));
             // Inject overlay state (popup, menu, confirm, display_panes)
             {

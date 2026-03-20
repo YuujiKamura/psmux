@@ -94,7 +94,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
         let pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: format!("pane %{}", wp.pane_id), child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, copy_state: None, pane_style: None };
         let win_name = default_shell_name(None, configured_shell);
         let initial_pane_id = wp.pane_id;
-        app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![initial_pane_id] });
+        app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![initial_pane_id], zoom_saved: None });
         app.next_win_id += 1;
         app.active_idx = app.windows.len() - 1;
         return Ok(());
@@ -161,7 +161,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: format!("pane %{}", pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, copy_state: None, pane_style: None };
     app.next_pane_id += 1;
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
-    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id] });
+    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None });
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
     Ok(())
@@ -264,7 +264,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: format!("pane %{}", raw_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, copy_state: None, pane_style: None };
     app.next_pane_id += 1;
     let win_name = std::path::Path::new(&raw_args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&raw_args[0]).to_string();
-    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id] });
+    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id], zoom_saved: None });
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
     Ok(())

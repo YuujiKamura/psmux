@@ -364,7 +364,7 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
 /// restored via `pop_zoom()` afterwards (tmux push/pop semantics).
 /// Returns true if zoom was active and was suspended.
 pub fn push_zoom(app: &mut AppState) -> bool {
-    if app.zoom_saved.is_some() {
+    if app.windows[app.active_idx].zoom_saved.is_some() {
         // Mark that we had zoom active, unzoom, but DON'T clear zoom_saved
         // — we move it to a temp slot so pop_zoom can re-apply it.
         unzoom_if_zoomed(app);
@@ -377,7 +377,7 @@ pub fn push_zoom(app: &mut AppState) -> bool {
 /// Re-apply zoom after a push_zoom operation (tmux push/pop semantics).
 /// Only re-zooms if `was_zoomed` is true.
 pub fn pop_zoom(app: &mut AppState, was_zoomed: bool) {
-    if was_zoomed && app.zoom_saved.is_none() {
+    if was_zoomed && app.windows[app.active_idx].zoom_saved.is_none() {
         toggle_zoom(app);
     }
 }
@@ -385,7 +385,7 @@ pub fn pop_zoom(app: &mut AppState, was_zoomed: bool) {
 /// If zoom is currently active, unzoom (restore saved sizes) and resize panes.
 /// Returns true if zoom was active and was cancelled.
 pub fn unzoom_if_zoomed(app: &mut AppState) -> bool {
-    if let Some(saved) = app.zoom_saved.take() {
+    if let Some(saved) = app.windows[app.active_idx].zoom_saved.take() {
         let win = &mut app.windows[app.active_idx];
         for (p, sz) in saved.into_iter() {
             if let Some(Node::Split { sizes, .. }) = get_split_mut(&mut win.root, &p) { *sizes = sz; }
@@ -399,7 +399,7 @@ pub fn unzoom_if_zoomed(app: &mut AppState) -> bool {
 
 pub fn toggle_zoom(app: &mut AppState) {
     let win = &mut app.windows[app.active_idx];
-    if app.zoom_saved.is_none() {
+    if win.zoom_saved.is_none() {
         let mut saved: Vec<(Vec<usize>, Vec<u16>)> = Vec::new();
         for depth in 0..win.active_path.len() {
             let p = win.active_path[..depth].to_vec();
@@ -409,9 +409,10 @@ pub fn toggle_zoom(app: &mut AppState) {
                 for i in 0..sizes.len() { sizes[i] = if i == idx { 100 } else { 0 }; }
             }
         }
-        app.zoom_saved = Some(saved);
+        win.zoom_saved = Some(saved);
     } else {
-        if let Some(saved) = app.zoom_saved.take() {
+        if let Some(saved) = app.windows[app.active_idx].zoom_saved.take() {
+            let win = &mut app.windows[app.active_idx];
             for (p, sz) in saved.into_iter() {
                 if let Some(Node::Split { sizes, .. }) = get_split_mut(&mut win.root, &p) { *sizes = sz; }
             }
@@ -493,7 +494,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
     let mut on_border = false;
     // Skip border detection when zoomed — no visible borders (#82)
     let mut borders: Vec<(Vec<usize>, LayoutKind, usize, u16, u16)> = Vec::new();
-    if app.zoom_saved.is_none() {
+    if win.zoom_saved.is_none() {
         compute_split_borders(&win.root, app.last_window_area, &mut borders);
     }
     let tol = 1u16;
@@ -954,6 +955,7 @@ pub fn break_pane_to_window(app: &mut AppState) {
             manual_rename: false,
             layout_index: 0,
             pane_mru: initial_mru,
+            zoom_saved: None,
         });
         app.next_win_id += 1;
         

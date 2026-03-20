@@ -500,9 +500,9 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             // If zoomed, check if there's a direct neighbor OR a wrap target.
             // If yes: cancel zoom and navigate to it.
             // If no (single-pane window): no-op — stay zoomed.
-            if app.zoom_saved.is_some() {
+            if app.windows[app.active_idx].zoom_saved.is_some() {
                 // Temporarily unzoom to compute real geometry
-                let saved = app.zoom_saved.take();
+                let saved = app.windows[app.active_idx].zoom_saved.take();
                 if let Some(ref s) = saved {
                     let win = &mut app.windows[app.active_idx];
                     for (p, sz) in s.iter() {
@@ -534,7 +534,7 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         for (p, sz) in s.iter() {
                             if let Some(Node::Split { sizes, .. }) = crate::tree::get_split_mut(&mut win.root, p) { *sizes = sz.clone(); }
                         }
-                        app.zoom_saved = Some(s);
+                        win.zoom_saved = Some(s);
                     }
                     crate::tree::resize_all_panes(app);
                 }
