@@ -71,20 +71,88 @@ pub fn cleanup_stale_port_files() {
                             Duration::from_millis(5)
                         ).is_err() {
                             let _ = std::fs::remove_file(&path);
-                            // Also remove the matching .key file to prevent
-                            // orphaned keys from accumulating (issue #136).
+                            // Also remove the matching .key and .pid files to prevent
+                            // orphaned files from accumulating (issue #136).
                             let key_path = path.with_extension("key");
                             let _ = std::fs::remove_file(&key_path);
+                            let pid_path = path.with_extension("pid");
+                            let _ = std::fs::remove_file(&pid_path);
                         }
                     } else {
                         let _ = std::fs::remove_file(&path);
                         let key_path = path.with_extension("key");
                         let _ = std::fs::remove_file(&key_path);
+                        let pid_path = path.with_extension("pid");
+                        let _ = std::fs::remove_file(&pid_path);
                     }
                 }
             }
         }
     }
+}
+
+/// Check if the server for the given session is alive.
+/// If a `.pid` file exists, verify the process is still running.
+/// If no `.pid` file exists, return true (backward compat — caller should
+/// fall back to TCP connection to determine liveness).
+/// Returns false (and cleans up stale files) when the PID file exists but
+/// the process is dead.
+pub fn check_server_alive(session: &str) -> bool {
+    let home = match env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
+        Ok(h) => h,
+        Err(_) => return true, // can't check, assume alive
+    };
+    let psmux_dir = std::path::PathBuf::from(home).join(".psmux");
+    check_server_alive_in_dir(session, &psmux_dir)
+}
+
+/// Core logic for `check_server_alive`, taking the `.psmux` directory
+/// as a parameter so tests can supply a temp directory without touching
+/// environment variables.
+pub(crate) fn check_server_alive_in_dir(session: &str, psmux_dir: &std::path::Path) -> bool {
+    let pid_path = psmux_dir.join(format!("{}.pid", session));
+    match std::fs::read_to_string(&pid_path) {
+        Ok(content) => {
+            if let Ok(pid) = content.trim().parse::<u32>() {
+                if is_pid_alive(pid) {
+                    true
+                } else {
+                    // Process is dead — clean up stale files
+                    let port_path = psmux_dir.join(format!("{}.port", session));
+                    let key_path = psmux_dir.join(format!("{}.key", session));
+                    let _ = std::fs::remove_file(&port_path);
+                    let _ = std::fs::remove_file(&key_path);
+                    let _ = std::fs::remove_file(&pid_path);
+                    false
+                }
+            } else {
+                true // malformed pid file, assume alive
+            }
+        }
+        Err(_) => true, // no pid file, backward compat — assume alive
+    }
+}
+
+/// Check if a process with the given PID is still running.
+pub(crate) fn is_pid_alive(pid: u32) -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| {
+            let out = String::from_utf8_lossy(&o.stdout);
+            // On English Windows, tasklist prints "INFO: No tasks..." when PID not found.
+            // On non-English Windows, the message is localized and won't contain "INFO:".
+            // Reliable check: when a process IS found, the output contains the PID number.
+            // When NOT found, the output is a short error/info message without the PID.
+            if out.contains("INFO:") {
+                return false;
+            }
+            // Check if the PID number appears in the output (it will be in the process line)
+            out.contains(&format!(" {} ", pid)) || out.contains(&format!(" {}\r", pid))
+        })
+        .unwrap_or(true) // can't check, assume alive
 }
 
 /// Read the session key from the key file
@@ -453,3 +521,7 @@ pub fn kill_remaining_server_processes() {
         .args(&["-f", "psmux|pmux"])
         .status();
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_session.rs"]
+mod tests;

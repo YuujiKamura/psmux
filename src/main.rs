@@ -321,20 +321,26 @@ fn run_main() -> io::Result<()> {
                                     } else {
                                         if base.contains("__") { continue; }
                                     }
+                                    // Check server liveness via PID file first
+                                    if !crate::session::check_server_alive(base) {
+                                        continue; // stale — already cleaned up
+                                    }
                                     if let Ok(port_str) = std::fs::read_to_string(e.path()) {
-                                        if let Ok(_p) = port_str.trim().parse::<u16>() {
-                                            let addr = format!("127.0.0.1:{}", port_str.trim());
+                                        if let Ok(port) = port_str.trim().parse::<u16>() {
+                                            let addr = format!("127.0.0.1:{}", port);
                                             if let Ok(mut s) = std::net::TcpStream::connect_timeout(
                                                 &addr.parse().unwrap(),
                                                 Duration::from_millis(50)
                                             ) {
                                                 let _ = s.set_read_timeout(Some(Duration::from_millis(50)));
+                                                let _ = s.set_nodelay(true);
                                                 // Read session key and authenticate
                                                 let key_path = format!("{}\\.psmux\\{}.key", home, base);
                                                 if let Ok(key) = std::fs::read_to_string(&key_path) {
                                                     let _ = std::io::Write::write_all(&mut s, format!("AUTH {}\n", key.trim()).as_bytes());
                                                 }
                                                 let _ = std::io::Write::write_all(&mut s, b"session-info\n");
+                                                let _ = std::io::Write::flush(&mut s);
                                                 let mut br = std::io::BufReader::new(s);
                                                 let mut line = String::new();
                                                 // Skip "OK" response from AUTH
@@ -343,16 +349,18 @@ fn run_main() -> io::Result<()> {
                                                     line.clear();
                                                     let _ = br.read_line(&mut line);
                                                 }
-                                                if !line.trim().is_empty() && line.trim() != "ERROR: Authentication required" { 
-                                                    println!("{}", line.trim_end()); 
-                                                } else { 
-                                                    println!("{}", base); 
+                                                if !line.trim().is_empty() && line.trim() != "ERROR: Authentication required" {
+                                                    println!("{}", line.trim_end());
+                                                } else {
+                                                    println!("{}", base);
                                                 }
                                             } else {
-                                                // stale port file - remove it along with matching key
+                                                // TCP connect failed — stale port file
                                                 let _ = std::fs::remove_file(e.path());
                                                 let key_path = e.path().with_extension("key");
                                                 let _ = std::fs::remove_file(&key_path);
+                                                let pid_path = e.path().with_extension("pid");
+                                                let _ = std::fs::remove_file(&pid_path);
                                             }
                                         }
                                     }
@@ -522,6 +530,8 @@ fn run_main() -> io::Result<()> {
                     } else {
                         // Stale port file - remove it and continue
                         let _ = std::fs::remove_file(&port_path);
+                        let pid_path = format!("{}\\.psmux\\{}.pid", home, port_file_base);
+                        let _ = std::fs::remove_file(&pid_path);
                     }
                 }
                 
@@ -577,6 +587,8 @@ fn run_main() -> io::Result<()> {
                                     } else { false }
                                 } else {
                                     let _ = std::fs::remove_file(&warm_port_path);
+                                    let warm_pid_path = format!("{}\\.psmux\\{}.pid", home, warm_base);
+                                    let _ = std::fs::remove_file(&warm_pid_path);
                                     false
                                 }
                             } else { false }
@@ -691,6 +703,8 @@ fn run_main() -> io::Result<()> {
                     } else { false };
                     if !server_alive {
                         let _ = std::fs::remove_file(&port_path);
+                        let pid_path = format!("{}\\.psmux\\{}.pid", home, port_file_base);
+                        let _ = std::fs::remove_file(&pid_path);
                         eprintln!("psmux: session '{}' exited immediately (check shell command)", name);
                         std::process::exit(1);
                     }
@@ -1101,10 +1115,12 @@ fn run_main() -> io::Result<()> {
                 }
                 // Try to send kill command to server
                 if send_control("kill-session\n".to_string()).is_err() {
-                    // Server not responding - clean up stale port file
+                    // Server not responding - clean up stale port/pid files
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let port_path = format!("{}\\.psmux\\{}.port", home, session_name);
+                    let pid_path = format!("{}\\.psmux\\{}.pid", home, session_name);
                     let _ = std::fs::remove_file(&port_path);
+                    let _ = std::fs::remove_file(&pid_path);
                 }
                 return Ok(());
             }

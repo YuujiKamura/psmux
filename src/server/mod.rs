@@ -184,10 +184,12 @@ fn spawn_warm_server(app: &AppState) {
                 }
             }
         }
-        // Stale port file — remove it (and matching key file)
+        // Stale port file — remove it (and matching key/pid files)
         let _ = std::fs::remove_file(&warm_port_path);
         let warm_key_path = format!("{}\\.psmux\\{}.key", home, warm_base);
         let _ = std::fs::remove_file(&warm_key_path);
+        let warm_pid_path = format!("{}\\.psmux\\{}.pid", home, warm_base);
+        let _ = std::fs::remove_file(&warm_pid_path);
     }
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
     let mut args: Vec<String> = vec!["server".into(), "-s".into(), "__warm__".into()];
@@ -376,6 +378,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 
     let regpath = format!("{}\\{}.port", dir, app.port_file_base());
     let _ = std::fs::write(&regpath, port.to_string());
+    let pidpath = format!("{}\\{}.pid", dir, app.port_file_base());
+    let _ = std::fs::write(&pidpath, std::process::id().to_string());
     let keypath = format!("{}\\{}.key", dir, app.port_file_base());
     let _ = std::fs::write(&keypath, &session_key);
 
@@ -990,8 +994,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                         let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                         let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                        let pidpath = format!("{}\\.psmux\\{}.pid", home, app.port_file_base());
                         let _ = std::fs::remove_file(&regpath);
                         let _ = std::fs::remove_file(&keypath);
+                        let _ = std::fs::remove_file(&pidpath);
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
                         if let Some(mut wp) = app.warm_pane.take() {
@@ -1836,13 +1842,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("window-closed");
                 }
                 CtrlReq::KillSession => {
-                    // Remove port/key files FIRST so clients see the session
+                    // Remove port/key/pid files FIRST so clients see the session
                     // as gone immediately, then kill processes.
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                     let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                    let pidpath = format!("{}\\.psmux\\{}.pid", home, app.port_file_base());
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
+                    let _ = std::fs::remove_file(&pidpath);
                     crate::types::shutdown_persistent_streams();
                     // Kill all child processes using a single process snapshot
                     tree::kill_all_children_batch(&mut app.windows);
@@ -1860,6 +1868,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let old_path = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                     let old_keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                    let old_pidpath = format!("{}\\.psmux\\{}.pid", home, app.port_file_base());
                     // Compute new port file base with socket_name prefix
                     let new_base = if let Some(ref sn) = app.socket_name {
                         format!("{}__{}" , sn, name)
@@ -1868,9 +1877,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     let new_path = format!("{}\\.psmux\\{}.port", home, new_base);
                     let new_keypath = format!("{}\\.psmux\\{}.key", home, new_base);
+                    let new_pidpath = format!("{}\\.psmux\\{}.pid", home, new_base);
                     if let Some(port) = app.control_port {
                         let _ = std::fs::remove_file(&old_path);
                         let _ = std::fs::write(&new_path, port.to_string());
+                        let _ = std::fs::remove_file(&old_pidpath);
+                        let _ = std::fs::write(&new_pidpath, std::process::id().to_string());
                         if let Ok(key) = std::fs::read_to_string(&old_keypath) {
                             let _ = std::fs::remove_file(&old_keypath);
                             let _ = std::fs::write(&new_keypath, key);
@@ -1887,6 +1899,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let old_path = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                     let old_keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                    let old_pidpath = format!("{}\\.psmux\\{}.pid", home, app.port_file_base());
                     let new_base = if let Some(ref sn) = app.socket_name {
                         format!("{}__{}" , sn, name)
                     } else {
@@ -1894,9 +1907,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     let new_path = format!("{}\\.psmux\\{}.port", home, new_base);
                     let new_keypath = format!("{}\\.psmux\\{}.key", home, new_base);
+                    let new_pidpath = format!("{}\\.psmux\\{}.pid", home, new_base);
                     if let Some(port) = app.control_port {
                         let _ = std::fs::remove_file(&old_path);
                         let _ = std::fs::write(&new_path, port.to_string());
+                        let _ = std::fs::remove_file(&old_pidpath);
+                        let _ = std::fs::write(&new_pidpath, std::process::id().to_string());
                         if let Ok(key) = std::fs::read_to_string(&old_keypath) {
                             let _ = std::fs::remove_file(&old_keypath);
                             let _ = std::fs::write(&new_keypath, key);
@@ -2622,13 +2638,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     app.hooks.remove(&hook);
                 }
                 CtrlReq::KillServer => {
-                    // Remove port/key files FIRST so clients see the session
+                    // Remove port/key/pid files FIRST so clients see the session
                     // as gone immediately, then kill processes.
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                     let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                    let pidpath = format!("{}\\.psmux\\{}.pid", home, app.port_file_base());
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
+                    let _ = std::fs::remove_file(&pidpath);
                     crate::types::shutdown_persistent_streams();
                     // Kill all child processes using a single process snapshot
                     tree::kill_all_children_batch(&mut app.windows);
@@ -3131,8 +3149,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                 let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                 let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                let pidpath = format!("{}\\.psmux\\{}.pid", home, app.port_file_base());
                 let _ = std::fs::remove_file(&regpath);
                 let _ = std::fs::remove_file(&keypath);
+                let _ = std::fs::remove_file(&pidpath);
                 crate::types::shutdown_persistent_streams();
                 // Kill warm pane's child (process::exit skips Drop)
                 if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }

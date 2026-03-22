@@ -58,8 +58,8 @@ if provided_key != session_key {
 let _ = write_stream.write_all(b"OK\n");
 let _ = write_stream.flush();
 
-// Set short read timeout for batched command processing
-let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(10)));
+// Set read timeout for batched command processing
+let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(200)));
 
 // Check for PERSISTENT flag and optional TARGET line
 let mut persistent = false;
@@ -580,7 +580,12 @@ match cmd {
         let (rtx, rrx) = mpsc::channel::<bool>();
         let _ = tx.send(CtrlReq::HasSession(rtx));
         if let Ok(exists) = rrx.recv() {
-            if !exists { std::process::exit(1); }
+            if exists {
+                let _ = write_stream.write_all(b"OK\n");
+            } else {
+                let _ = write_stream.write_all(b"ERROR: session not found\n");
+            }
+            let _ = write_stream.flush();
         }
     }
     "rename-session" | "rename" => {
